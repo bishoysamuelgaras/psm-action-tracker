@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "node ./node_modules/typescript/bin/tsc -b && node ./node_modules/vite/bin/vite.js build",
     "preview": "vite preview",
-    "check": "tsc --noEmit"
+    "check": "node ./node_modules/typescript/bin/tsc --noEmit"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.0.0",
@@ -17,18 +17,17 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.0.0",
-    "tailwind-merge": "^3.3.0"
-  },
-  "devDependencies": {
+    "tailwind-merge": "^3.3.0",
+    "@tailwindcss/postcss": "^4.0.0",
     "@tailwindcss/vite": "^4.0.0",
+    "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^5.0.0",
-    "typescript": "^5.8.0",
-    "vite": "^8.0.0",
-    "@types/node": "^22.0.0",
-    "postcss": "^8.5.10",
     "autoprefixer": "^10.4.22",
-    "@tailwindcss/postcss": "^4.0.0"
-  }
+    "postcss": "^8.5.10",
+    "typescript": "^5.8.0",
+    "vite": "^8.0.0"
+  },
+  "devDependencies": {}
 }
