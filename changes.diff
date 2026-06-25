@@ -1,0 +1,22 @@
+diff --git a/src/features/recommendations/api/recommendations.api.ts b/src/features/recommendations/api/recommendations.api.ts
+new file mode 100644
+--- /dev/null
++++ b/src/features/recommendations/api/recommendations.api.ts
+@@
++export type RewriteRecommendationResponse = {
++  rewrittenText: string
++  provider?: string
++  model?: string
++}
++
++export async function rewriteRecommendationTextWithGroq(text: string): Promise<RewriteRecommendationResponse> {
++  const response = await fetch("/.netlify/functions/rewrite-recommendation", {
++    method: "POST",
++    headers: { "Content-Type": "application/json" },
++    body: JSON.stringify({ text })
++  })
++  const payload = await response.json().catch(() => ({}))
++  if (!response.ok) throw new Error(typeof payload?.error === "string" ? payload.error : "Failed to rewrite recommendation text.")
++  if (!payload?.rewrittenText || typeof payload.rewrittenText !== "string") throw new Error("Groq returned an empty rewrite.")
++  return { rewrittenText: payload.rewrittenText, provider: payload.provider, model: payload.model }
++}

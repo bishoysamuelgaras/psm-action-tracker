@@ -1,0 +1,362 @@
+--- "/mnt/data/work9proj/New folder (5)/src/features/recommendations/pages/RecommendationsPage.tsx"	2026-04-01 16:53:14.000000000 +0000
++++ /mnt/data/gemini_patch/src/features/recommendations/pages/RecommendationsPage.tsx	2026-04-02 11:25:16.049427570 +0000
+@@ -1,4 +1,4 @@
+-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
++import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+ import { Link, useSearchParams } from "react-router-dom";
+ 
+ import { Badge } from "@/components/ui/badge";
+@@ -22,6 +22,7 @@
+   listRecommendationLookups,
+   listRecommendations,
+   reserveRecommendationNumber,
++  rewriteRecommendationWithGemini,
+   updateRecommendation,
+   type RecommendationFormLookups,
+   type RecommendationListItem,
+@@ -45,6 +46,27 @@
+   priorityCode: "medium"
+ };
+ 
++type BrowserSpeechRecognition = {
++  lang: string;
++  interimResults: boolean;
++  continuous: boolean;
++  onresult: ((event: { resultIndex?: number; results?: ArrayLike<ArrayLike<{ transcript?: string }>> }) => void) | null;
++  onerror: ((event: { error?: string }) => void) | null;
++  onend: (() => void) | null;
++  start: () => void;
++  stop: () => void;
++};
++
++type BrowserSpeechRecognitionConstructor = new () => BrowserSpeechRecognition;
++
++type RewritePreviewState = {
++  originalText: string;
++  rewrittenText: string;
++} | null;
++
++const PROFESSIONAL_REWRITE_HINT =
++  "Gemini rewrite keeps the same meaning, but makes the recommendation shorter and more professional for PSM tracking.";
++
+ const priorityBadgeTone: Record<string, "slate" | "amber" | "red" | "green" | "blue"> = {
+   low: "green",
+   medium: "blue",
+@@ -81,6 +103,15 @@
+ 
+   const [numberBusy, setNumberBusy] = useState(false);
+   const [numberHint, setNumberHint] = useState("Select source to preview recommendation number.");
++  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
++  const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
++  const selectionRef = useRef<{ start: number; end: number } | null>(null);
++  const [voiceSupported, setVoiceSupported] = useState(false);
++  const [isListening, setIsListening] = useState(false);
++  const [voiceError, setVoiceError] = useState("");
++  const [rewriteBusy, setRewriteBusy] = useState(false);
++  const [rewriteError, setRewriteError] = useState("");
++  const [rewritePreview, setRewritePreview] = useState<RewritePreviewState>(null);
+ 
+   const activeSource = useMemo(
+     () => lookups.sources.find((item) => item.id === sourceFilter) ?? null,
+@@ -97,6 +128,26 @@
+     [form.sourceId, lookups.sources]
+   );
+ 
++  useEffect(() => {
++    const candidate = (
++      window as Window & {
++        SpeechRecognition?: BrowserSpeechRecognitionConstructor;
++        webkitSpeechRecognition?: BrowserSpeechRecognitionConstructor;
++      }
++    ).SpeechRecognition ?? (
++      window as Window & {
++        SpeechRecognition?: BrowserSpeechRecognitionConstructor;
++        webkitSpeechRecognition?: BrowserSpeechRecognitionConstructor;
++      }
++    ).webkitSpeechRecognition;
++
++    setVoiceSupported(Boolean(candidate));
++  }, []);
++
++  useEffect(() => () => {
++    recognitionRef.current?.stop();
++  }, []);
++
+   const loadPageData = useCallback(async () => {
+     setLoading(true);
+     setError("");
+@@ -197,6 +248,11 @@
+     });
+     setNumberHint("Select source to preview recommendation number.");
+     setNotice("");
++    setVoiceError("");
++    setRewriteError("");
++    setRewritePreview(null);
++    recognitionRef.current?.stop();
++    setIsListening(false);
+   }, [sourceFilter]);
+ 
+   const startEdit = useCallback((row: RecommendationListItem) => {
+@@ -210,9 +266,148 @@
+     });
+     setNumberHint("This number is locked after creation.");
+     setNotice("");
++    setVoiceError("");
++    setRewriteError("");
++    setRewritePreview(null);
++    recognitionRef.current?.stop();
++    setIsListening(false);
+     window.scrollTo({ top: 0, behavior: "smooth" });
+   }, []);
+ 
++  function insertTextAtCursor(nextText: string) {
++    const textarea = textareaRef.current;
++    const fallbackText = form.recommendationText;
++    const start = selectionRef.current?.start ?? textarea?.selectionStart ?? fallbackText.length;
++    const end = selectionRef.current?.end ?? textarea?.selectionEnd ?? fallbackText.length;
++    const safeStart = Math.max(0, start);
++    const safeEnd = Math.max(safeStart, end);
++    const prefix = fallbackText.slice(0, safeStart);
++    const suffix = fallbackText.slice(safeEnd);
++    const spacerBefore = prefix && !/\s$/.test(prefix) ? " " : "";
++    const spacerAfter = suffix && !/^\s/.test(suffix) ? " " : "";
++    const merged = `${prefix}${spacerBefore}${nextText.trim()}${spacerAfter}${suffix}`.replace(/\s{2,}/g, " ").trim();
++
++    setForm((current) => ({ ...current, recommendationText: merged }));
++    setTimeout(() => {
++      textareaRef.current?.focus();
++      const caret = (prefix + spacerBefore + nextText.trim()).length;
++      textareaRef.current?.setSelectionRange(caret, caret);
++    }, 0);
++  }
++
++  function handleVoiceToggle() {
++    if (!canManageRecommendations || saving || rewriteBusy) return;
++
++    const SpeechRecognitionCtor = (
++      window as Window & {
++        SpeechRecognition?: BrowserSpeechRecognitionConstructor;
++        webkitSpeechRecognition?: BrowserSpeechRecognitionConstructor;
++      }
++    ).SpeechRecognition ?? (
++      window as Window & {
++        SpeechRecognition?: BrowserSpeechRecognitionConstructor;
++        webkitSpeechRecognition?: BrowserSpeechRecognitionConstructor;
++      }
++    ).webkitSpeechRecognition;
++
++    if (!SpeechRecognitionCtor) {
++      setVoiceError("Voice input works best on supported Chrome / Edge browsers.");
++      return;
++    }
++
++    if (isListening) {
++      recognitionRef.current?.stop();
++      return;
++    }
++
++    try {
++      const recognition = new SpeechRecognitionCtor();
++      recognition.lang = /^\s*[A-Za-z]/.test(form.recommendationText) ? "en-US" : "ar-EG";
++      recognition.interimResults = true;
++      recognition.continuous = false;
++      recognition.onresult = (event) => {
++        const results = event.results ? Array.from(event.results) : [];
++        const transcript = results
++          .slice(event.resultIndex ?? 0)
++          .flatMap((result) => Array.from(result))
++          .map((part) => part.transcript ?? "")
++          .join(" ")
++          .trim();
++
++        if (transcript) {
++          insertTextAtCursor(transcript);
++          setVoiceError("");
++        }
++      };
++      recognition.onerror = (event) => {
++        const code = event.error || "unknown";
++        const nextMessage =
++          code === "not-allowed"
++            ? "Microphone permission was denied."
++            : code === "no-speech"
++              ? "No speech was detected."
++              : "Voice input failed. Please try again.";
++        setVoiceError(nextMessage);
++      };
++      recognition.onend = () => {
++        setIsListening(false);
++        recognitionRef.current = null;
++      };
++
++      selectionRef.current = {
++        start: textareaRef.current?.selectionStart ?? form.recommendationText.length,
++        end: textareaRef.current?.selectionEnd ?? form.recommendationText.length
++      };
++      recognitionRef.current = recognition;
++      setVoiceError("");
++      setIsListening(true);
++      recognition.start();
++    } catch {
++      setIsListening(false);
++      setVoiceError("Voice input is not available on this browser.");
++    }
++  }
++
++  async function handleMagicAiPreview() {
++    if (!canManageRecommendations || saving || rewriteBusy) return;
++
++    const currentText = form.recommendationText.trim();
++    if (!currentText) {
++      setRewriteError("Write or dictate recommendation text first.");
++      return;
++    }
++
++    setRewriteBusy(true);
++    setRewriteError("");
++
++    try {
++      const rewrittenText = await rewriteRecommendationWithGemini(currentText);
++      setRewritePreview({ originalText: currentText, rewrittenText });
++    } catch (err) {
++      setRewritePreview(null);
++      setRewriteError(err instanceof Error ? err.message : "Failed to generate Gemini rewrite.");
++    } finally {
++      setRewriteBusy(false);
++    }
++  }
++
++  function applyRewritePreview() {
++    if (!rewritePreview) return;
++    setForm((current) => ({ ...current, recommendationText: rewritePreview.rewrittenText }));
++    setRewritePreview(null);
++    setRewriteError("");
++    setTimeout(() => {
++      textareaRef.current?.focus();
++      const length = rewritePreview.rewrittenText.length;
++      textareaRef.current?.setSelectionRange(length, length);
++    }, 0);
++  }
++
++  function clearRewritePreview() {
++    setRewritePreview(null);
++    setRewriteError("");
++  }
++
+   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+     event.preventDefault();
+ 
+@@ -411,15 +606,113 @@
+                 <div className="mt-5 space-y-4">
+                   <FormField label="Recommendation text" required>
+                     <Textarea
++                      ref={textareaRef}
+                       value={form.recommendationText}
+                       onChange={(event) =>
+                         setForm((current) => ({ ...current, recommendationText: event.target.value }))
+                       }
++                      onSelect={(event) => {
++                        const target = event.currentTarget;
++                        selectionRef.current = {
++                          start: target.selectionStart ?? 0,
++                          end: target.selectionEnd ?? 0
++                        };
++                      }}
++                      onKeyUp={(event) => {
++                        const target = event.currentTarget;
++                        selectionRef.current = {
++                          start: target.selectionStart ?? 0,
++                          end: target.selectionEnd ?? 0
++                        };
++                      }}
++                      onClick={(event) => {
++                        const target = event.currentTarget;
++                        selectionRef.current = {
++                          start: target.selectionStart ?? 0,
++                          end: target.selectionEnd ?? 0
++                        };
++                      }}
+                       placeholder="Write the recommendation exactly as issued by the investigation or audit team"
+                       disabled={!canManageRecommendations || saving}
+                       rows={5}
+                     />
+                   </FormField>
++
++                  <div className="flex flex-wrap items-center gap-3">
++                    <button
++                      type="button"
++                      onClick={handleVoiceToggle}
++                      disabled={!canManageRecommendations || saving || !voiceSupported}
++                      className="relative inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-slate-300 bg-white text-slate-900 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
++                      aria-label={isListening ? "Stop voice input" : "Start voice input"}
++                      title={voiceSupported ? (isListening ? "Stop voice input" : "Start voice input") : "Voice input works best on Chrome / Edge"}
++                    >
++                      <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
++                        <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 1 0 6 0V6a3 3 0 0 0-3-3Z" />
++                        <path d="M19 11a7 7 0 0 1-14 0" />
++                        <path d="M12 18v3" />
++                        <path d="M8 21h8" />
++                      </svg>
++                      {isListening ? <span className="absolute right-2 top-2 h-2.5 w-2.5 rounded-full bg-red-500 shadow-[0_0_0_3px_rgba(239,68,68,0.16)]" /> : null}
++                    </button>
++
++                    <Button
++                      type="button"
++                      variant="outline"
++                      onClick={() => void handleMagicAiPreview()}
++                      disabled={!canManageRecommendations || saving || rewriteBusy || !form.recommendationText.trim()}
++                    >
++                      {rewriteBusy ? "Magic AI..." : "Magic AI"}
++                    </Button>
++
++                    {isListening ? <span className="text-sm font-medium text-red-600">Listening...</span> : null}
++                    {!isListening && rewriteBusy ? <span className="text-sm font-medium text-blue-700">Generating professional PSM rewrite...</span> : null}
++                  </div>
++
++                  <div className="space-y-2 text-xs text-slate-500">
++                    <div>Voice input inserts the spoken text into the recommendation field.</div>
++                    <div>{PROFESSIONAL_REWRITE_HINT}</div>
++                  </div>
++
++                  {voiceError ? (
++                    <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
++                      {voiceError}
++                    </div>
++                  ) : null}
++
++                  {rewriteError ? (
++                    <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
++                      {rewriteError}
++                    </div>
++                  ) : null}
++
++                  {rewritePreview ? (
++                    <div className="rounded-3xl border border-blue-200 bg-blue-50/60 p-4 sm:p-5">
++                      <div className="flex items-center gap-3">
++                        <Badge tone="blue">Magic AI</Badge>
++                        <div>
++                          <div className="text-base font-semibold text-slate-900">Gemini rewrite preview</div>
++                          <div className="text-sm text-slate-600">Review the improved wording before replacing the current text.</div>
++                        </div>
++                      </div>
++
++                      <div className="mt-4 grid gap-4 lg:grid-cols-2">
++                        <div className="rounded-3xl border border-slate-200 bg-white p-4">
++                          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Current text</div>
++                          <div className="mt-3 whitespace-pre-wrap text-sm leading-7 text-slate-700">{rewritePreview.originalText}</div>
++                        </div>
++                        <div className="rounded-3xl border border-blue-200 bg-white p-4 shadow-sm">
++                          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-blue-700">Professional PSM-style rewrite</div>
++                          <div className="mt-3 whitespace-pre-wrap text-sm leading-7 text-slate-900">{rewritePreview.rewrittenText}</div>
++                        </div>
++                      </div>
++
++                      <div className="mt-4 flex flex-wrap gap-3">
++                        <Button type="button" onClick={applyRewritePreview}>Use rewritten text</Button>
++                        <Button type="button" variant="outline" onClick={clearRewritePreview}>Keep original</Button>
++                      </div>
++                    </div>
++                  ) : null}
+                 </div>
+               </div>
+ 

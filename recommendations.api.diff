@@ -1,0 +1,62 @@
+--- "/mnt/data/work9proj/New folder (5)/src/features/recommendations/api/recommendations.api.ts"	2026-04-01 16:53:14.000000000 +0000
++++ /mnt/data/gemini_patch/src/features/recommendations/api/recommendations.api.ts	2026-04-02 11:22:22.696140988 +0000
+@@ -279,3 +279,59 @@
+   const { error } = await supabase.from("recommendations").delete().eq("id", id);
+   if (error) throw error;
+ }
++
++
++type RewriteRecommendationResponse = {
++  rewrittenText?: string;
++  error?: string;
++};
++
++export async function rewriteRecommendationWithGemini(inputText: string) {
++  const text = inputText.trim();
++  if (!text) {
++    throw new Error("Recommendation text is required.");
++  }
++
++  const { data } = await supabase.auth.getSession();
++  const accessToken = data.session?.access_token;
++
++  if (!accessToken) {
++    throw new Error("No active session found.");
++  }
++
++  const response = await fetch("/.netlify/functions/rewrite-recommendation", {
++    method: "POST",
++    headers: {
++      "Content-Type": "application/json",
++      Authorization: `Bearer ${accessToken}`
++    },
++    body: JSON.stringify({ text })
++  });
++
++  const rawBody = await response.text();
++  let payload: RewriteRecommendationResponse = {};
++
++  if (rawBody) {
++    try {
++      payload = JSON.parse(rawBody) as RewriteRecommendationResponse;
++    } catch {
++      if (!response.ok && response.status === 404) {
++        throw new Error(
++          "Function rewrite-recommendation was not found. Run the updated Netlify functions with netlify dev or deploy them first."
++        );
++      }
++      throw new Error("Gemini rewrite returned an unreadable response.");
++    }
++  }
++
++  if (!response.ok) {
++    throw new Error(payload.error || "Failed to rewrite recommendation.");
++  }
++
++  const rewrittenText = String(payload.rewrittenText || "").trim();
++  if (!rewrittenText) {
++    throw new Error("Gemini rewrite returned an empty result.");
++  }
++
++  return rewrittenText;
++}
